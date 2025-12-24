@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -10,10 +10,11 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { toast } from 'sonner';
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import Icon from '@/components/ui/icon';
 import QRCode from 'qrcode';
 
-type UserRole = 'client' | 'cashier' | 'admin' | 'creator' | 'nikitovsky' | 'head-cashier' | null;
+type UserRole = 'client' | 'cashier' | 'admin' | 'creator' | 'nikitovsky' | 'head-cashier' | 'super-admin' | null;
 
 interface Document {
   id: string;
@@ -34,12 +35,21 @@ interface Document {
   createdAt: string;
 }
 
+interface User {
+  id: string;
+  username: string;
+  role: UserRole;
+  isBlocked: boolean;
+  createdAt: string;
+}
+
 const PASSWORDS: Record<string, string> = {
   cashier: '25',
   admin: '2025',
   creator: '202505',
   nikitovsky: '20252025',
   'head-cashier': '202520',
+  'super-admin': '2505',
   archive: '202505',
 };
 
@@ -52,22 +62,35 @@ const CATEGORY_LIMITS: Record<string, number> = {
 
 export default function Index() {
   const [currentRole, setCurrentRole] = useState<UserRole>(null);
-  const [loginStep, setLoginStep] = useState<'role' | 'auth'>('role');
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [loginStep, setLoginStep] = useState<'role' | 'auth' | 'nikitovskyAuth'>('role');
   const [selectedRole, setSelectedRole] = useState<UserRole>(null);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [failedAttempts, setFailedAttempts] = useState(0);
   const [lockoutTime, setLockoutTime] = useState<number | null>(null);
   
+  const [users, setUsers] = useState<User[]>([
+    { id: '1', username: 'Никитовский', role: 'nikitovsky', isBlocked: false, createdAt: new Date().toISOString() },
+    { id: '2', username: '24', role: 'super-admin', isBlocked: false, createdAt: new Date().toISOString() },
+  ]);
   const [documents, setDocuments] = useState<Document[]>([]);
   const [archivedDocuments, setArchivedDocuments] = useState<Document[]>([]);
   const [showNewDocForm, setShowNewDocForm] = useState(false);
   const [showArchive, setShowArchive] = useState(false);
+  const [showRoleManagement, setShowRoleManagement] = useState(false);
+  const [showScanner, setShowScanner] = useState(false);
   const [archivePassword, setArchivePassword] = useState('');
   const [showQRDialog, setShowQRDialog] = useState(false);
-  const [selectedQR, setSelectedQR] = useState('');
   const [qrImage, setQrImage] = useState('');
+  const [scannedQR, setScannedQR] = useState('');
+  const [deleteConfirm, setDeleteConfirm] = useState<Document | null>(null);
   
+  const [newUserForm, setNewUserForm] = useState({ username: '', role: 'client' as UserRole, password: '' });
+  
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
   const [formData, setFormData] = useState({
     firstName: '',
     lastName: '',
@@ -95,13 +118,54 @@ export default function Index() {
   }, [lockoutTime]);
 
   const handleRoleSelect = (role: string) => {
-    if (role === 'nikitovsky') {
-      setCurrentRole('nikitovsky');
-      toast.success('Вход выполнен как Никитовский');
+    if (role === 'nikitovsky-group') {
+      setLoginStep('nikitovskyAuth');
       return;
     }
     setSelectedRole(role as UserRole);
     setLoginStep('auth');
+  };
+
+  const handleNikitovskyLogin = () => {
+    if (lockoutTime && Date.now() < lockoutTime) {
+      const remaining = Math.ceil((lockoutTime - Date.now()) / 1000);
+      toast.error(`Вход заблокирован. Осталось ${remaining} секунд`);
+      return;
+    }
+
+    if (password === PASSWORDS.nikitovsky) {
+      const user = users.find(u => u.username === 'Никитовский');
+      if (user && !user.isBlocked) {
+        setCurrentRole('nikitovsky');
+        setCurrentUser(user);
+        setFailedAttempts(0);
+        setLoginStep('role');
+        toast.success('Вход выполнен как Никитовский');
+        return;
+      }
+    }
+    
+    if (password === PASSWORDS['super-admin']) {
+      const user = users.find(u => u.username === '24');
+      if (user && !user.isBlocked) {
+        setCurrentRole('super-admin');
+        setCurrentUser(user);
+        setFailedAttempts(0);
+        setLoginStep('role');
+        toast.success('Вход выполнен как Супер-админ (24)');
+        return;
+      }
+    }
+
+    const newAttempts = failedAttempts + 1;
+    setFailedAttempts(newAttempts);
+    
+    if (newAttempts >= 3) {
+      setLockoutTime(Date.now() + 90000);
+      toast.error('3 неудачные попытки. Блокировка на 90 секунд');
+    } else {
+      toast.error(`Неверный пароль. Попытка ${newAttempts}/3`);
+    }
   };
 
   const handleLogin = () => {
@@ -111,8 +175,21 @@ export default function Index() {
       return;
     }
 
+    const user = users.find(u => u.username === username && u.role === selectedRole);
+    
+    if (!user) {
+      toast.error('Пользователь не найден в базе');
+      return;
+    }
+
+    if (user.isBlocked) {
+      toast.error('Пользователь заблокирован');
+      return;
+    }
+
     if (selectedRole && PASSWORDS[selectedRole] === password) {
       setCurrentRole(selectedRole);
+      setCurrentUser(user);
       setFailedAttempts(0);
       setLoginStep('role');
       toast.success(`Вход выполнен: ${getRoleName(selectedRole)}`);
@@ -131,9 +208,11 @@ export default function Index() {
 
   const handleLogout = () => {
     setCurrentRole(null);
+    setCurrentUser(null);
     setUsername('');
     setPassword('');
     setShowArchive(false);
+    setShowRoleManagement(false);
     toast.info('Выход выполнен');
   };
 
@@ -146,11 +225,8 @@ export default function Index() {
     }
   };
 
-  const generateDocumentNumber = (category: Document['category']): string => {
-    const categoryDocs = documents.filter(d => d.category === category);
-    const number = categoryDocs.length + 1;
-    const prefix = category.substring(0, 3).toUpperCase();
-    return `${prefix}-${String(number).padStart(4, '0')}`;
+  const generateRandomQRCode = (): string => {
+    return Array.from({ length: 12 }, () => Math.floor(Math.random() * 10)).join('');
   };
 
   const handleCreateDocument = async () => {
@@ -165,7 +241,7 @@ export default function Index() {
       return;
     }
 
-    const docNumber = generateDocumentNumber(formData.category);
+    const docNumber = generateRandomQRCode();
     const qrImageData = await generateQR(docNumber);
 
     const newDoc: Document = {
@@ -183,7 +259,7 @@ export default function Index() {
       depositDate: new Date().toISOString(),
       pickupDate: formData.pickupDate,
       status: 'active',
-      createdBy: username || currentRole || 'system',
+      createdBy: currentUser?.username || currentRole || 'system',
       createdAt: new Date().toISOString(),
     };
 
@@ -202,9 +278,15 @@ export default function Index() {
       pickupDate: '',
     });
 
-    toast.success(`Документ ${docNumber} создан`);
+    toast.success(`Документ создан с номером ${docNumber}`);
     setQrImage(qrImageData);
     setShowQRDialog(true);
+    
+    if ('speechSynthesis' in window) {
+      const utterance = new SpeechSynthesisUtterance(`Номер документа ${docNumber.split('').join(' ')}`);
+      utterance.lang = 'ru-RU';
+      speechSynthesis.speak(utterance);
+    }
   };
 
   const handleIssueDocument = (doc: Document) => {
@@ -214,16 +296,97 @@ export default function Index() {
     toast.success(`Документ ${doc.qrCode} выдан и перемещён в архив`);
     
     if ('speechSynthesis' in window) {
-      const utterance = new SpeechSynthesisUtterance(`Номер ${doc.qrCode}`);
+      const utterance = new SpeechSynthesisUtterance(`Выдан документ номер ${doc.qrCode.split('').join(' ')}`);
       utterance.lang = 'ru-RU';
       speechSynthesis.speak(utterance);
     }
+  };
+
+  const handleDeleteDocument = (doc: Document) => {
+    setDocuments(prev => prev.filter(d => d.id !== doc.id));
+    setDeleteConfirm(null);
+    toast.success(`Документ ${doc.qrCode} удалён`);
   };
 
   const handleShowQR = async (qrCode: string) => {
     const qrImageData = await generateQR(qrCode);
     setQrImage(qrImageData);
     setShowQRDialog(true);
+  };
+
+  const handleScanQR = () => {
+    setShowScanner(true);
+    setTimeout(async () => {
+      if (videoRef.current && navigator.mediaDevices) {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+          videoRef.current.srcObject = stream;
+          videoRef.current.play();
+        } catch (err) {
+          toast.error('Не удалось получить доступ к камере');
+        }
+      }
+    }, 100);
+  };
+
+  const processScannedQR = (qrCode: string) => {
+    const doc = documents.find(d => d.qrCode === qrCode);
+    if (doc) {
+      handleIssueDocument(doc);
+      setShowScanner(false);
+      setScannedQR('');
+      if (videoRef.current && videoRef.current.srcObject) {
+        const stream = videoRef.current.srcObject as MediaStream;
+        stream.getTracks().forEach(track => track.stop());
+      }
+    } else {
+      toast.error('Документ с таким QR-кодом не найден');
+    }
+  };
+
+  const handleCreateUser = () => {
+    if (!newUserForm.username || !newUserForm.password) {
+      toast.error('Заполните имя пользователя и пароль');
+      return;
+    }
+
+    if (users.find(u => u.username === newUserForm.username)) {
+      toast.error('Пользователь с таким именем уже существует');
+      return;
+    }
+
+    const newUser: User = {
+      id: Date.now().toString(),
+      username: newUserForm.username,
+      role: newUserForm.role,
+      isBlocked: false,
+      createdAt: new Date().toISOString(),
+    };
+
+    setUsers(prev => [...prev, newUser]);
+    setNewUserForm({ username: '', role: 'client', password: '' });
+    toast.success(`Пользователь ${newUser.username} создан`);
+  };
+
+  const handleToggleUserBlock = (userId: string) => {
+    setUsers(prev => prev.map(u => {
+      if (u.id === userId) {
+        const newBlockStatus = !u.isBlocked;
+        toast.info(`Пользователь ${u.username} ${newBlockStatus ? 'заблокирован' : 'разблокирован'}`);
+        return { ...u, isBlocked: newBlockStatus };
+      }
+      return u;
+    }));
+  };
+
+  const handleChangeUserRole = (userId: string, newRole: UserRole) => {
+    setUsers(prev => prev.map(u => {
+      if (u.id === userId) {
+        toast.success(`Роль пользователя ${u.username} изменена на ${getRoleName(newRole)}`);
+        return { ...u, role: newRole };
+      }
+      return u;
+    }));
   };
 
   const handlePrintForm = (doc?: Document) => {
@@ -268,70 +431,107 @@ export default function Index() {
       creator: 'Создатель',
       nikitovsky: 'Никитовский',
       'head-cashier': 'Главный кассир',
+      'super-admin': 'Супер-админ (24)',
     };
     return names[role || ''] || '';
   };
 
-  const canCreateDocuments = currentRole && ['cashier', 'admin', 'creator', 'nikitovsky', 'head-cashier'].includes(currentRole);
-  const canViewArchive = currentRole && ['admin', 'creator', 'nikitovsky'].includes(currentRole);
+  const canCreateDocuments = currentRole && ['cashier', 'admin', 'creator', 'nikitovsky', 'head-cashier', 'super-admin'].includes(currentRole);
+  const canViewArchive = currentRole && ['admin', 'creator', 'nikitovsky', 'super-admin'].includes(currentRole);
+  const canManageRoles = currentRole && ['nikitovsky', 'super-admin'].includes(currentRole);
+  const canDeleteDocuments = currentRole === 'super-admin';
+  const canManageNikitovsky = currentRole === 'super-admin';
 
   if (!currentRole) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 flex items-center justify-center p-4">
-        <Card className="w-full max-w-md shadow-xl">
+      <div className="min-h-screen bg-gradient-to-br from-zinc-900 via-zinc-800 to-zinc-900 flex items-center justify-center p-4">
+        <Card className="w-full max-w-md shadow-2xl border-zinc-700 bg-zinc-800/50 backdrop-blur">
           <CardHeader className="text-center">
-            <div className="mx-auto w-20 h-20 bg-primary rounded-full flex items-center justify-center mb-4">
+            <div className="mx-auto w-20 h-20 bg-black rounded-xl flex items-center justify-center mb-4 shadow-xl">
               <Icon name="FileText" size={40} className="text-white" />
             </div>
-            <CardTitle className="text-3xl font-bold">QR Документы</CardTitle>
-            <CardDescription>Система управления документами</CardDescription>
+            <CardTitle className="text-3xl font-bold text-white">QR Документы</CardTitle>
+            <CardDescription className="text-zinc-400">Система управления документами v3.0</CardDescription>
           </CardHeader>
           <CardContent>
             {loginStep === 'role' ? (
               <div className="space-y-3">
-                <Button onClick={() => handleRoleSelect('client')} className="w-full h-14 text-lg" variant="outline">
+                <Button onClick={() => handleRoleSelect('client')} className="w-full h-14 text-lg bg-zinc-700 hover:bg-zinc-600 text-white border-zinc-600">
                   <Icon name="User" className="mr-2" />
                   Покупатель
                 </Button>
-                <Button onClick={() => handleRoleSelect('cashier')} className="w-full h-14 text-lg" variant="outline">
+                <Button onClick={() => handleRoleSelect('cashier')} className="w-full h-14 text-lg bg-zinc-700 hover:bg-zinc-600 text-white border-zinc-600">
                   <Icon name="Calculator" className="mr-2" />
                   Кассир
                 </Button>
-                <Button onClick={() => handleRoleSelect('head-cashier')} className="w-full h-14 text-lg" variant="outline">
+                <Button onClick={() => handleRoleSelect('head-cashier')} className="w-full h-14 text-lg bg-zinc-700 hover:bg-zinc-600 text-white border-zinc-600">
                   <Icon name="Crown" className="mr-2" />
                   Главный кассир
                 </Button>
-                <Button onClick={() => handleRoleSelect('admin')} className="w-full h-14 text-lg" variant="outline">
+                <Button onClick={() => handleRoleSelect('admin')} className="w-full h-14 text-lg bg-zinc-700 hover:bg-zinc-600 text-white border-zinc-600">
                   <Icon name="Shield" className="mr-2" />
                   Администратор
                 </Button>
-                <Button onClick={() => handleRoleSelect('creator')} className="w-full h-14 text-lg" variant="outline">
+                <Button onClick={() => handleRoleSelect('creator')} className="w-full h-14 text-lg bg-zinc-700 hover:bg-zinc-600 text-white border-zinc-600">
                   <Icon name="Settings" className="mr-2" />
                   Создатель
                 </Button>
-                <Button onClick={() => handleRoleSelect('nikitovsky')} className="w-full h-14 text-lg" variant="outline">
-                  <Icon name="Star" className="mr-2" />
-                  Никитовский
+                <Button onClick={() => handleRoleSelect('nikitovsky-group')} className="w-full h-14 text-lg bg-black hover:bg-zinc-900 text-white border-zinc-700">
+                  <Icon name="Sparkles" className="mr-2" />
+                  Никитовский / 24
                 </Button>
+              </div>
+            ) : loginStep === 'nikitovskyAuth' ? (
+              <div className="space-y-4">
+                <div>
+                  <Label className="text-zinc-300">Введите пароль</Label>
+                  <Input 
+                    type="password" 
+                    value={password} 
+                    onChange={(e) => setPassword(e.target.value)} 
+                    placeholder="Пароль Никитовского или 24" 
+                    className="bg-zinc-700 border-zinc-600 text-white"
+                    onKeyDown={(e) => e.key === 'Enter' && handleNikitovskyLogin()}
+                  />
+                  <p className="text-xs text-zinc-500 mt-2">20252025 - Никитовский | 2505 - Супер-админ (24)</p>
+                </div>
+                {lockoutTime && Date.now() < lockoutTime && (
+                  <p className="text-sm text-red-400">Блокировка: {Math.ceil((lockoutTime - Date.now()) / 1000)} сек</p>
+                )}
+                <div className="flex gap-2">
+                  <Button onClick={() => { setLoginStep('role'); setPassword(''); }} variant="outline" className="flex-1 bg-zinc-700 border-zinc-600 text-white hover:bg-zinc-600">
+                    Назад
+                  </Button>
+                  <Button onClick={handleNikitovskyLogin} className="flex-1 bg-black hover:bg-zinc-900" disabled={lockoutTime !== null && Date.now() < lockoutTime}>
+                    Войти
+                  </Button>
+                </div>
               </div>
             ) : (
               <div className="space-y-4">
                 <div>
-                  <Label>Имя пользователя</Label>
-                  <Input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="Введите имя" />
+                  <Label className="text-zinc-300">Имя пользователя</Label>
+                  <Input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="Введите имя" className="bg-zinc-700 border-zinc-600 text-white" />
                 </div>
                 <div>
-                  <Label>Пароль</Label>
-                  <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Введите пароль" />
+                  <Label className="text-zinc-300">Пароль</Label>
+                  <Input 
+                    type="password" 
+                    value={password} 
+                    onChange={(e) => setPassword(e.target.value)} 
+                    placeholder="Введите пароль" 
+                    className="bg-zinc-700 border-zinc-600 text-white"
+                    onKeyDown={(e) => e.key === 'Enter' && handleLogin()}
+                  />
                 </div>
                 {lockoutTime && Date.now() < lockoutTime && (
-                  <p className="text-sm text-red-600">Блокировка: {Math.ceil((lockoutTime - Date.now()) / 1000)} сек</p>
+                  <p className="text-sm text-red-400">Блокировка: {Math.ceil((lockoutTime - Date.now()) / 1000)} сек</p>
                 )}
                 <div className="flex gap-2">
-                  <Button onClick={() => setLoginStep('role')} variant="outline" className="flex-1">
+                  <Button onClick={() => { setLoginStep('role'); setPassword(''); setUsername(''); }} variant="outline" className="flex-1 bg-zinc-700 border-zinc-600 text-white hover:bg-zinc-600">
                     Назад
                   </Button>
-                  <Button onClick={handleLogin} className="flex-1" disabled={lockoutTime !== null && Date.now() < lockoutTime}>
+                  <Button onClick={handleLogin} className="flex-1 bg-black hover:bg-zinc-900" disabled={lockoutTime !== null && Date.now() < lockoutTime}>
                     Войти
                   </Button>
                 </div>
@@ -343,26 +543,160 @@ export default function Index() {
     );
   }
 
+  if (showRoleManagement) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-zinc-900 via-zinc-800 to-zinc-900 p-8">
+        <div className="max-w-6xl mx-auto">
+          <div className="flex justify-between items-center mb-8">
+            <div>
+              <h1 className="text-4xl font-bold text-white">Управление ролями</h1>
+              <p className="text-zinc-400 mt-2">Создание и управление пользователями</p>
+            </div>
+            <Button onClick={() => setShowRoleManagement(false)} variant="outline" className="bg-zinc-800 border-zinc-700 text-white hover:bg-zinc-700">
+              <Icon name="ArrowLeft" className="mr-2" />
+              Назад
+            </Button>
+          </div>
+
+          <div className="grid gap-6 mb-8">
+            <Card className="border-zinc-700 bg-zinc-800/50">
+              <CardHeader>
+                <CardTitle className="text-white">Создать нового пользователя</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-3 gap-4">
+                  <div>
+                    <Label className="text-zinc-300">Имя пользователя</Label>
+                    <Input 
+                      value={newUserForm.username} 
+                      onChange={(e) => setNewUserForm({...newUserForm, username: e.target.value})} 
+                      placeholder="Введите имя"
+                      className="bg-zinc-700 border-zinc-600 text-white"
+                    />
+                  </div>
+                  <div>
+                    <Label className="text-zinc-300">Роль</Label>
+                    <Select value={newUserForm.role} onValueChange={(value) => setNewUserForm({...newUserForm, role: value as UserRole})}>
+                      <SelectTrigger className="bg-zinc-700 border-zinc-600 text-white">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent className="bg-zinc-800 border-zinc-700">
+                        <SelectItem value="client">Покупатель</SelectItem>
+                        <SelectItem value="cashier">Кассир</SelectItem>
+                        <SelectItem value="head-cashier">Главный кассир</SelectItem>
+                        <SelectItem value="admin">Администратор</SelectItem>
+                        {currentRole === 'super-admin' && <SelectItem value="creator">Создатель</SelectItem>}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="flex items-end">
+                    <Button onClick={handleCreateUser} className="w-full bg-black hover:bg-zinc-900">
+                      <Icon name="Plus" className="mr-2" />
+                      Создать
+                    </Button>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className="border-zinc-700 bg-zinc-800/50">
+              <CardHeader>
+                <CardTitle className="text-white">Список пользователей ({users.length})</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <Table>
+                  <TableHeader>
+                    <TableRow className="border-zinc-700 hover:bg-zinc-700/50">
+                      <TableHead className="text-zinc-300">Имя</TableHead>
+                      <TableHead className="text-zinc-300">Роль</TableHead>
+                      <TableHead className="text-zinc-300">Статус</TableHead>
+                      <TableHead className="text-zinc-300">Дата создания</TableHead>
+                      <TableHead className="text-zinc-300">Действия</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {users.map(user => (
+                      <TableRow key={user.id} className="border-zinc-700 hover:bg-zinc-700/30">
+                        <TableCell className="text-white font-semibold">{user.username}</TableCell>
+                        <TableCell>
+                          <Badge variant="outline" className="border-zinc-600 text-zinc-300">
+                            {getRoleName(user.role)}
+                          </Badge>
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant={user.isBlocked ? 'destructive' : 'default'} className={user.isBlocked ? '' : 'bg-green-900 text-green-300'}>
+                            {user.isBlocked ? 'Заблокирован' : 'Активен'}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-zinc-400">{new Date(user.createdAt).toLocaleDateString('ru-RU')}</TableCell>
+                        <TableCell>
+                          <div className="flex gap-2">
+                            {(canManageNikitovsky || (user.role !== 'nikitovsky' && user.role !== 'super-admin')) && (
+                              <Button 
+                                size="sm" 
+                                variant={user.isBlocked ? 'default' : 'destructive'} 
+                                onClick={() => handleToggleUserBlock(user.id)}
+                                className={user.isBlocked ? 'bg-green-900 hover:bg-green-800' : ''}
+                              >
+                                <Icon name={user.isBlocked ? 'Unlock' : 'Lock'} size={16} />
+                              </Button>
+                            )}
+                            {currentRole === 'super-admin' && user.role !== 'super-admin' && (
+                              <Select value={user.role || ''} onValueChange={(value) => handleChangeUserRole(user.id, value as UserRole)}>
+                                <SelectTrigger className="h-9 w-[140px] bg-zinc-700 border-zinc-600 text-white text-xs">
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent className="bg-zinc-800 border-zinc-700">
+                                  <SelectItem value="client">Покупатель</SelectItem>
+                                  <SelectItem value="cashier">Кассир</SelectItem>
+                                  <SelectItem value="head-cashier">Гл. кассир</SelectItem>
+                                  <SelectItem value="admin">Администратор</SelectItem>
+                                  <SelectItem value="creator">Создатель</SelectItem>
+                                  <SelectItem value="nikitovsky">Никитовский</SelectItem>
+                                </SelectContent>
+                              </Select>
+                            )}
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (showArchive) {
     if (archivePassword !== PASSWORDS.archive) {
       return (
-        <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 flex items-center justify-center p-4">
-          <Card className="w-full max-w-md">
+        <div className="min-h-screen bg-gradient-to-br from-zinc-900 via-zinc-800 to-zinc-900 flex items-center justify-center p-4">
+          <Card className="w-full max-w-md border-zinc-700 bg-zinc-800/50">
             <CardHeader>
-              <CardTitle>Доступ к архиву</CardTitle>
-              <CardDescription>Введите пароль архива</CardDescription>
+              <CardTitle className="text-white">Доступ к архиву</CardTitle>
+              <CardDescription className="text-zinc-400">Введите пароль архива</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              <Input type="password" value={archivePassword} onChange={(e) => setArchivePassword(e.target.value)} placeholder="Пароль" />
+              <Input 
+                type="password" 
+                value={archivePassword} 
+                onChange={(e) => setArchivePassword(e.target.value)} 
+                placeholder="Пароль" 
+                className="bg-zinc-700 border-zinc-600 text-white"
+                onKeyDown={(e) => e.key === 'Enter' && archivePassword === PASSWORDS.archive && toast.success('Доступ к архиву открыт')}
+              />
               <div className="flex gap-2">
-                <Button onClick={() => setShowArchive(false)} variant="outline" className="flex-1">Назад</Button>
+                <Button onClick={() => setShowArchive(false)} variant="outline" className="flex-1 bg-zinc-700 border-zinc-600 text-white hover:bg-zinc-600">Назад</Button>
                 <Button onClick={() => {
                   if (archivePassword === PASSWORDS.archive) {
                     toast.success('Доступ к архиву открыт');
                   } else {
                     toast.error('Неверный пароль');
                   }
-                }} className="flex-1">Открыть</Button>
+                }} className="flex-1 bg-black hover:bg-zinc-900">Открыть</Button>
               </div>
             </CardContent>
           </Card>
@@ -371,45 +705,45 @@ export default function Index() {
     }
 
     return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 p-8">
+      <div className="min-h-screen bg-gradient-to-br from-zinc-900 via-zinc-800 to-zinc-900 p-8">
         <div className="max-w-7xl mx-auto">
           <div className="flex justify-between items-center mb-8">
             <div>
-              <h1 className="text-4xl font-bold text-gray-800">Архив документов</h1>
-              <p className="text-gray-600 mt-2">Все операции сохранены навсегда</p>
+              <h1 className="text-4xl font-bold text-white">Архив документов</h1>
+              <p className="text-zinc-400 mt-2">Все операции сохранены навсегда • Записей: {archivedDocuments.length}</p>
             </div>
-            <Button onClick={() => { setShowArchive(false); setArchivePassword(''); }} variant="outline">
+            <Button onClick={() => { setShowArchive(false); setArchivePassword(''); }} variant="outline" className="bg-zinc-800 border-zinc-700 text-white hover:bg-zinc-700">
               <Icon name="ArrowLeft" className="mr-2" />
               Назад
             </Button>
           </div>
 
-          <Card>
+          <Card className="border-zinc-700 bg-zinc-800/50">
             <CardContent className="p-6">
               <Table>
                 <TableHeader>
-                  <TableRow>
-                    <TableHead>QR Код</TableHead>
-                    <TableHead>ФИО</TableHead>
-                    <TableHead>Телефон</TableHead>
-                    <TableHead>Категория</TableHead>
-                    <TableHead>Предмет</TableHead>
-                    <TableHead>Дата сдачи</TableHead>
-                    <TableHead>Дата выдачи</TableHead>
+                  <TableRow className="border-zinc-700 hover:bg-zinc-700/50">
+                    <TableHead className="text-zinc-300">QR Код</TableHead>
+                    <TableHead className="text-zinc-300">ФИО</TableHead>
+                    <TableHead className="text-zinc-300">Телефон</TableHead>
+                    <TableHead className="text-zinc-300">Категория</TableHead>
+                    <TableHead className="text-zinc-300">Предмет</TableHead>
+                    <TableHead className="text-zinc-300">Дата сдачи</TableHead>
+                    <TableHead className="text-zinc-300">Дата выдачи</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {archivedDocuments.map(doc => (
-                    <TableRow key={doc.id}>
-                      <TableCell className="font-mono">{doc.qrCode}</TableCell>
-                      <TableCell>{`${doc.lastName} ${doc.firstName} ${doc.middleName}`}</TableCell>
-                      <TableCell>{doc.phone}</TableCell>
+                    <TableRow key={doc.id} className="border-zinc-700 hover:bg-zinc-700/30">
+                      <TableCell className="font-mono text-white">{doc.qrCode}</TableCell>
+                      <TableCell className="text-zinc-300">{`${doc.lastName} ${doc.firstName} ${doc.middleName}`}</TableCell>
+                      <TableCell className="text-zinc-400">{doc.phone}</TableCell>
                       <TableCell>
-                        <Badge variant="outline">{doc.category}</Badge>
+                        <Badge variant="outline" className="border-zinc-600 text-zinc-300">{doc.category}</Badge>
                       </TableCell>
-                      <TableCell>{doc.itemDescription}</TableCell>
-                      <TableCell>{new Date(doc.depositDate).toLocaleDateString('ru-RU')}</TableCell>
-                      <TableCell>{new Date().toLocaleDateString('ru-RU')}</TableCell>
+                      <TableCell className="text-zinc-400">{doc.itemDescription}</TableCell>
+                      <TableCell className="text-zinc-400">{new Date(doc.depositDate).toLocaleDateString('ru-RU')}</TableCell>
+                      <TableCell className="text-zinc-400">{new Date().toLocaleDateString('ru-RU')}</TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
@@ -422,26 +756,32 @@ export default function Index() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
-      <header className="bg-white border-b shadow-sm">
+    <div className="min-h-screen bg-gradient-to-br from-zinc-900 via-zinc-800 to-zinc-900">
+      <header className="bg-black/50 border-b border-zinc-700 shadow-xl backdrop-blur">
         <div className="max-w-7xl mx-auto px-8 py-4 flex justify-between items-center">
           <div className="flex items-center gap-3">
-            <div className="w-12 h-12 bg-primary rounded-lg flex items-center justify-center">
-              <Icon name="FileText" size={24} className="text-white" />
+            <div className="w-12 h-12 bg-white rounded-xl flex items-center justify-center shadow-lg">
+              <Icon name="FileText" size={24} className="text-black" />
             </div>
             <div>
-              <h1 className="text-2xl font-bold text-gray-800">QR Документы</h1>
-              <p className="text-sm text-gray-600">{getRoleName(currentRole)}</p>
+              <h1 className="text-2xl font-bold text-white">QR Документы v3.0</h1>
+              <p className="text-sm text-zinc-400">{getRoleName(currentRole)} • {currentUser?.username}</p>
             </div>
           </div>
           <div className="flex items-center gap-3">
+            {canManageRoles && (
+              <Button onClick={() => setShowRoleManagement(true)} variant="outline" className="bg-zinc-800 border-zinc-700 text-white hover:bg-zinc-700">
+                <Icon name="Users" className="mr-2" />
+                Роли
+              </Button>
+            )}
             {canViewArchive && (
-              <Button onClick={() => setShowArchive(true)} variant="outline">
+              <Button onClick={() => setShowArchive(true)} variant="outline" className="bg-zinc-800 border-zinc-700 text-white hover:bg-zinc-700">
                 <Icon name="Archive" className="mr-2" />
                 Архив
               </Button>
             )}
-            <Button onClick={handleLogout} variant="outline">
+            <Button onClick={handleLogout} variant="outline" className="bg-zinc-800 border-zinc-700 text-white hover:bg-zinc-700">
               <Icon name="LogOut" className="mr-2" />
               Выход
             </Button>
@@ -452,63 +792,76 @@ export default function Index() {
       <main className="max-w-7xl mx-auto p-8">
         <div className="mb-8 flex justify-between items-center">
           <div>
-            <h2 className="text-3xl font-bold text-gray-800">Управление документами</h2>
-            <p className="text-gray-600 mt-2">Текущих документов: {documents.length}</p>
+            <h2 className="text-3xl font-bold text-white">Управление документами</h2>
+            <p className="text-zinc-400 mt-2">Активных документов: {documents.length} • Архив: {archivedDocuments.length}</p>
           </div>
-          {canCreateDocuments && (
-            <Button onClick={() => setShowNewDocForm(true)} size="lg" className="shadow-lg">
-              <Icon name="Plus" className="mr-2" />
-              Новый документ
-            </Button>
-          )}
+          <div className="flex gap-3">
+            {canCreateDocuments && (
+              <>
+                <Button onClick={handleScanQR} size="lg" className="bg-zinc-800 hover:bg-zinc-700 text-white shadow-lg">
+                  <Icon name="ScanLine" className="mr-2" />
+                  Сканер
+                </Button>
+                <Button onClick={() => setShowNewDocForm(true)} size="lg" className="bg-black hover:bg-zinc-900 text-white shadow-lg">
+                  <Icon name="Plus" className="mr-2" />
+                  Новый документ
+                </Button>
+              </>
+            )}
+          </div>
         </div>
 
         <Tabs defaultValue="all" className="space-y-6">
-          <TabsList className="grid w-full grid-cols-5">
-            <TabsTrigger value="all">Все ({documents.length})</TabsTrigger>
-            <TabsTrigger value="documents">Документы ({documents.filter(d => d.category === 'documents').length}/{CATEGORY_LIMITS.documents})</TabsTrigger>
-            <TabsTrigger value="photos">Фото ({documents.filter(d => d.category === 'photos').length}/{CATEGORY_LIMITS.photos})</TabsTrigger>
-            <TabsTrigger value="cards">Карты ({documents.filter(d => d.category === 'cards').length}/{CATEGORY_LIMITS.cards})</TabsTrigger>
-            <TabsTrigger value="other">Другое ({documents.filter(d => d.category === 'other').length})</TabsTrigger>
+          <TabsList className="grid w-full grid-cols-5 bg-zinc-800 border-zinc-700">
+            <TabsTrigger value="all" className="data-[state=active]:bg-black data-[state=active]:text-white">Все ({documents.length})</TabsTrigger>
+            <TabsTrigger value="documents" className="data-[state=active]:bg-black data-[state=active]:text-white">Документы ({documents.filter(d => d.category === 'documents').length}/{CATEGORY_LIMITS.documents})</TabsTrigger>
+            <TabsTrigger value="photos" className="data-[state=active]:bg-black data-[state=active]:text-white">Фото ({documents.filter(d => d.category === 'photos').length}/{CATEGORY_LIMITS.photos})</TabsTrigger>
+            <TabsTrigger value="cards" className="data-[state=active]:bg-black data-[state=active]:text-white">Карты ({documents.filter(d => d.category === 'cards').length}/{CATEGORY_LIMITS.cards})</TabsTrigger>
+            <TabsTrigger value="other" className="data-[state=active]:bg-black data-[state=active]:text-white">Другое ({documents.filter(d => d.category === 'other').length})</TabsTrigger>
           </TabsList>
 
           {['all', 'documents', 'photos', 'cards', 'other'].map(tab => (
             <TabsContent key={tab} value={tab}>
-              <Card>
+              <Card className="border-zinc-700 bg-zinc-800/50">
                 <CardContent className="p-6">
                   <Table>
                     <TableHeader>
-                      <TableRow>
-                        <TableHead>QR Код</TableHead>
-                        <TableHead>ФИО</TableHead>
-                        <TableHead>Телефон</TableHead>
-                        <TableHead>Предмет</TableHead>
-                        <TableHead>Дата сдачи</TableHead>
-                        <TableHead>Действия</TableHead>
+                      <TableRow className="border-zinc-700 hover:bg-zinc-700/50">
+                        <TableHead className="text-zinc-300">QR Код</TableHead>
+                        <TableHead className="text-zinc-300">ФИО</TableHead>
+                        <TableHead className="text-zinc-300">Телефон</TableHead>
+                        <TableHead className="text-zinc-300">Предмет</TableHead>
+                        <TableHead className="text-zinc-300">Дата сдачи</TableHead>
+                        <TableHead className="text-zinc-300">Действия</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {documents
                         .filter(doc => tab === 'all' || doc.category === tab)
                         .map(doc => (
-                          <TableRow key={doc.id}>
-                            <TableCell className="font-mono font-semibold">{doc.qrCode}</TableCell>
-                            <TableCell>{`${doc.lastName} ${doc.firstName}`}</TableCell>
-                            <TableCell>{doc.phone}</TableCell>
-                            <TableCell className="max-w-xs truncate">{doc.itemDescription}</TableCell>
-                            <TableCell>{new Date(doc.depositDate).toLocaleDateString('ru-RU')}</TableCell>
+                          <TableRow key={doc.id} className="border-zinc-700 hover:bg-zinc-700/30">
+                            <TableCell className="font-mono font-semibold text-white">{doc.qrCode}</TableCell>
+                            <TableCell className="text-zinc-300">{`${doc.lastName} ${doc.firstName}`}</TableCell>
+                            <TableCell className="text-zinc-400">{doc.phone}</TableCell>
+                            <TableCell className="max-w-xs truncate text-zinc-400">{doc.itemDescription}</TableCell>
+                            <TableCell className="text-zinc-400">{new Date(doc.depositDate).toLocaleDateString('ru-RU')}</TableCell>
                             <TableCell>
                               <div className="flex gap-2">
-                                <Button size="sm" variant="outline" onClick={() => handleShowQR(doc.qrCode)}>
+                                <Button size="sm" variant="outline" onClick={() => handleShowQR(doc.qrCode)} className="bg-zinc-700 border-zinc-600 text-white hover:bg-zinc-600">
                                   <Icon name="QrCode" size={16} />
                                 </Button>
-                                <Button size="sm" variant="outline" onClick={() => handlePrintForm(doc)}>
+                                <Button size="sm" variant="outline" onClick={() => handlePrintForm(doc)} className="bg-zinc-700 border-zinc-600 text-white hover:bg-zinc-600">
                                   <Icon name="Printer" size={16} />
                                 </Button>
-                                <Button size="sm" onClick={() => handleIssueDocument(doc)}>
+                                <Button size="sm" onClick={() => handleIssueDocument(doc)} className="bg-green-900 hover:bg-green-800 text-white">
                                   <Icon name="Check" size={16} className="mr-1" />
                                   Выдать
                                 </Button>
+                                {canDeleteDocuments && (
+                                  <Button size="sm" variant="destructive" onClick={() => setDeleteConfirm(doc)}>
+                                    <Icon name="Trash2" size={16} />
+                                  </Button>
+                                )}
                               </div>
                             </TableCell>
                           </TableRow>
@@ -523,43 +876,43 @@ export default function Index() {
       </main>
 
       <Dialog open={showNewDocForm} onOpenChange={setShowNewDocForm}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto bg-zinc-800 border-zinc-700 text-white">
           <DialogHeader>
-            <DialogTitle>Новый документ</DialogTitle>
-            <DialogDescription>Заполните анкету для приёма документа</DialogDescription>
+            <DialogTitle className="text-white">Новый документ</DialogTitle>
+            <DialogDescription className="text-zinc-400">Заполните анкету для приёма документа</DialogDescription>
           </DialogHeader>
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <Label>Фамилия *</Label>
-              <Input value={formData.lastName} onChange={(e) => setFormData({...formData, lastName: e.target.value})} />
+              <Label className="text-zinc-300">Фамилия *</Label>
+              <Input value={formData.lastName} onChange={(e) => setFormData({...formData, lastName: e.target.value})} className="bg-zinc-700 border-zinc-600 text-white" />
             </div>
             <div>
-              <Label>Имя *</Label>
-              <Input value={formData.firstName} onChange={(e) => setFormData({...formData, firstName: e.target.value})} />
+              <Label className="text-zinc-300">Имя *</Label>
+              <Input value={formData.firstName} onChange={(e) => setFormData({...formData, firstName: e.target.value})} className="bg-zinc-700 border-zinc-600 text-white" />
             </div>
             <div>
-              <Label>Отчество</Label>
-              <Input value={formData.middleName} onChange={(e) => setFormData({...formData, middleName: e.target.value})} />
+              <Label className="text-zinc-300">Отчество</Label>
+              <Input value={formData.middleName} onChange={(e) => setFormData({...formData, middleName: e.target.value})} className="bg-zinc-700 border-zinc-600 text-white" />
             </div>
             <div>
-              <Label>Телефон *</Label>
-              <Input value={formData.phone} onChange={(e) => setFormData({...formData, phone: e.target.value})} placeholder="+7" />
+              <Label className="text-zinc-300">Телефон *</Label>
+              <Input value={formData.phone} onChange={(e) => setFormData({...formData, phone: e.target.value})} placeholder="+7" className="bg-zinc-700 border-zinc-600 text-white" />
             </div>
             <div className="col-span-2">
-              <Label>Email</Label>
-              <Input type="email" value={formData.email} onChange={(e) => setFormData({...formData, email: e.target.value})} />
+              <Label className="text-zinc-300">Email</Label>
+              <Input type="email" value={formData.email} onChange={(e) => setFormData({...formData, email: e.target.value})} className="bg-zinc-700 border-zinc-600 text-white" />
             </div>
             <div className="col-span-2">
-              <Label>Описание предмета *</Label>
-              <Textarea value={formData.itemDescription} onChange={(e) => setFormData({...formData, itemDescription: e.target.value})} rows={3} />
+              <Label className="text-zinc-300">Описание предмета *</Label>
+              <Textarea value={formData.itemDescription} onChange={(e) => setFormData({...formData, itemDescription: e.target.value})} rows={3} className="bg-zinc-700 border-zinc-600 text-white" />
             </div>
             <div>
-              <Label>Категория</Label>
+              <Label className="text-zinc-300">Категория</Label>
               <Select value={formData.category} onValueChange={(value) => setFormData({...formData, category: value as Document['category']})}>
-                <SelectTrigger>
+                <SelectTrigger className="bg-zinc-700 border-zinc-600 text-white">
                   <SelectValue />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent className="bg-zinc-800 border-zinc-700">
                   <SelectItem value="documents">Документы</SelectItem>
                   <SelectItem value="photos">Фото</SelectItem>
                   <SelectItem value="cards">Карты</SelectItem>
@@ -568,24 +921,24 @@ export default function Index() {
               </Select>
             </div>
             <div>
-              <Label>Дата получения</Label>
-              <Input type="date" value={formData.pickupDate} onChange={(e) => setFormData({...formData, pickupDate: e.target.value})} />
+              <Label className="text-zinc-300">Дата получения</Label>
+              <Input type="date" value={formData.pickupDate} onChange={(e) => setFormData({...formData, pickupDate: e.target.value})} className="bg-zinc-700 border-zinc-600 text-white" />
             </div>
             <div>
-              <Label>Сумма при сдаче</Label>
-              <Input type="number" value={formData.depositAmount} onChange={(e) => setFormData({...formData, depositAmount: e.target.value})} placeholder="0" />
+              <Label className="text-zinc-300">Сумма при сдаче</Label>
+              <Input type="number" value={formData.depositAmount} onChange={(e) => setFormData({...formData, depositAmount: e.target.value})} placeholder="0" className="bg-zinc-700 border-zinc-600 text-white" />
             </div>
             <div>
-              <Label>Сумма при получении</Label>
-              <Input type="number" value={formData.pickupAmount} onChange={(e) => setFormData({...formData, pickupAmount: e.target.value})} placeholder="0" />
+              <Label className="text-zinc-300">Сумма при получении</Label>
+              <Input type="number" value={formData.pickupAmount} onChange={(e) => setFormData({...formData, pickupAmount: e.target.value})} placeholder="0" className="bg-zinc-700 border-zinc-600 text-white" />
             </div>
           </div>
           <div className="flex gap-2 mt-4">
-            <Button variant="outline" onClick={() => handlePrintForm()} className="flex-1">
+            <Button variant="outline" onClick={() => handlePrintForm()} className="flex-1 bg-zinc-700 border-zinc-600 text-white hover:bg-zinc-600">
               <Icon name="Printer" className="mr-2" />
               Печать пустой анкеты
             </Button>
-            <Button onClick={handleCreateDocument} className="flex-1">
+            <Button onClick={handleCreateDocument} className="flex-1 bg-black hover:bg-zinc-900">
               <Icon name="Check" className="mr-2" />
               Создать документ
             </Button>
@@ -594,19 +947,19 @@ export default function Index() {
       </Dialog>
 
       <Dialog open={showQRDialog} onOpenChange={setShowQRDialog}>
-        <DialogContent className="max-w-md text-center">
+        <DialogContent className="max-w-md text-center bg-zinc-800 border-zinc-700">
           <DialogHeader>
-            <DialogTitle>QR Код документа</DialogTitle>
+            <DialogTitle className="text-white">QR Код документа</DialogTitle>
           </DialogHeader>
           {qrImage && (
             <div className="flex flex-col items-center gap-4">
-              <img src={qrImage} alt="QR Code" className="w-64 h-64" />
+              <img src={qrImage} alt="QR Code" className="w-64 h-64 rounded-lg border-4 border-zinc-700" />
               <Button onClick={() => {
                 const link = document.createElement('a');
                 link.download = 'qr-code.png';
                 link.href = qrImage;
                 link.click();
-              }}>
+              }} className="bg-black hover:bg-zinc-900">
                 <Icon name="Download" className="mr-2" />
                 Скачать QR
               </Button>
@@ -614,6 +967,51 @@ export default function Index() {
           )}
         </DialogContent>
       </Dialog>
+
+      <Dialog open={showScanner} onOpenChange={setShowScanner}>
+        <DialogContent className="max-w-lg bg-zinc-800 border-zinc-700">
+          <DialogHeader>
+            <DialogTitle className="text-white">Сканер QR-кодов</DialogTitle>
+            <DialogDescription className="text-zinc-400">Наведите камеру на QR-код или введите номер вручную</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <video ref={videoRef} className="w-full h-64 bg-black rounded-lg" />
+            <canvas ref={canvasRef} className="hidden" />
+            <div>
+              <Label className="text-zinc-300">Или введите номер вручную</Label>
+              <div className="flex gap-2">
+                <Input 
+                  value={scannedQR} 
+                  onChange={(e) => setScannedQR(e.target.value)} 
+                  placeholder="Введите 12-значный номер"
+                  className="bg-zinc-700 border-zinc-600 text-white"
+                  onKeyDown={(e) => e.key === 'Enter' && scannedQR && processScannedQR(scannedQR)}
+                />
+                <Button onClick={() => scannedQR && processScannedQR(scannedQR)} className="bg-black hover:bg-zinc-900">
+                  <Icon name="Search" />
+                </Button>
+              </div>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog open={deleteConfirm !== null} onOpenChange={() => setDeleteConfirm(null)}>
+        <AlertDialogContent className="bg-zinc-800 border-zinc-700">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="text-white">Удалить документ?</AlertDialogTitle>
+            <AlertDialogDescription className="text-zinc-400">
+              Вы уверены, что хотите удалить документ {deleteConfirm?.qrCode}? Это действие необратимо.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel className="bg-zinc-700 border-zinc-600 text-white hover:bg-zinc-600">Отмена</AlertDialogCancel>
+            <AlertDialogAction onClick={() => deleteConfirm && handleDeleteDocument(deleteConfirm)} className="bg-red-900 hover:bg-red-800">
+              Удалить
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
